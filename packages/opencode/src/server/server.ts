@@ -534,7 +534,6 @@ export namespace Server {
               })
             })
           },
-        )
         ) as unknown as Hono,
   )
 
@@ -556,7 +555,7 @@ export namespace Server {
   async function fetchAndInjectIndexHtml(rootPath: string): Promise<string> {
     const response = await fetch(`${REMOTE_PROXY_URL}/index.html`)
     if (!response.ok) throw new Error(`Failed to fetch index.html: ${response.status}`)
-    
+
     const html = await response.text()
     return rootPath ? injectRootPath(html, rootPath) : html
   }
@@ -564,13 +563,16 @@ export namespace Server {
   function createIndexHandler(rootPath: string) {
     let cachedHtml: string | null = null
     let cacheTime = 0
-    
+
     return async (c: any) => {
+      console.log(`[DEBUG] indexHandler hit: path=${c.req.path}, rootPath=${rootPath}`)
       const now = Date.now()
       if (cachedHtml && (now - cacheTime) < INDEX_CACHE_TTL_MS) {
+        console.log(`[DEBUG] indexHandler: serving cached HTML`)
         return c.html(cachedHtml, 200, { "Content-Security-Policy": HTML_CSP_HEADER })
       }
-      
+
+      console.log(`[DEBUG] indexHandler: fetching fresh HTML`)
       cachedHtml = await fetchAndInjectIndexHtml(rootPath)
       cacheTime = now
       return c.html(cachedHtml, 200, { "Content-Security-Policy": HTML_CSP_HEADER })
@@ -579,50 +581,83 @@ export namespace Server {
 
   function createStaticHandler() {
     return async (c: any) => {
-      const response = await proxy(`${REMOTE_PROXY_URL}${c.req.path}`, {
-        ...c.req,
-        headers: { ...c.req.raw.headers, host: "app.opencode.ai" }
-      })
-      return response
-    }
-  }
+      // Strip rootPath from the request path for proxying to remote
+      let path = c.req.path
+      if (_rootPath && path.startsWith(_rootPath)) {
+        path = path.slice(_rootPath.length) || "/"
+      }
 
-  /**
-   * Creates app with common routes to avoid duplication
-   */
-  function createAppWithRoutes(
-    indexHandler: (c: any) => Promise<Response>,
-    staticHandler: any,
-    apiApp: Hono
-  ): Hono {
-    return new Hono()
-      .route("/", apiApp)
-      .get("/", indexHandler)
-      .get("/index.html", indexHandler)
-      .use("/*", staticHandler)
-      .all("/*", indexHandler) as unknown as Hono
+      // Proxy to remote
+      const remoteUrl = `${REMOTE_PROXY_URL}${path}`
+      const response = await fetch(remoteUrl, {
+        method: c.req.method,
+        headers: {
+          ...Object.fromEntries(c.req.raw.headers.entries()),
+          host: "app.opencode.ai",
+        },
+        body: c.req.raw.body,
+      })
+
+      // If HTML, inject rootPath
+      const contentType = response.headers.get("content-type")
+      if (contentType && contentType.includes("text/html")) {
+        const html = await response.text()
+        const injected = injectRootPath(html, _rootPath)
+
+        // Copy headers but exclude encoding/length as body changed
+        const headers = new Headers(response.headers)
+        headers.delete("content-encoding")
+        headers.delete("content-length")
+        headers.delete("transfer-encoding")
+        headers.set("Content-Security-Policy", HTML_CSP_HEADER)
+
+        return c.html(injected, response.status, Object.fromEntries(headers.entries()))
+      }
+
+      // For other assets, return response but strip encoding headers
+      // as fetch() likely decompressed the body but headers remain
+      const headers = new Headers(response.headers)
+      headers.delete("content-encoding")
+      headers.delete("content-length")
+      headers.delete("transfer-encoding")
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+      })
+    }
   }
 
   export async function listen(opts: { port: number; hostname: string; mdns?: boolean; cors?: string[]; rootPath?: string }) {
     _corsWhitelist = opts.cors ?? []
     _rootPath = opts.rootPath ?? ""
-    
+
+    // Normalize rootPath (remove trailing slash)
+    const rootPath = _rootPath.endsWith("/") ? _rootPath.slice(0, -1) : _rootPath
+    _rootPath = rootPath
+
     const staticHandler = createStaticHandler()
-    const indexHandler = createIndexHandler(_rootPath)
     const apiApp = App()
 
-    let baseApp: Hono
+    let baseApp = new Hono()
 
-    if (opts.rootPath) {
-      const rootedApp = new Hono()
-        .basePath(opts.rootPath)
-        .route("/", createAppWithRoutes(indexHandler, staticHandler, apiApp))
-      
-      baseApp = new Hono()
-        .route("/", rootedApp)
-        .use("/*", staticHandler)
+    if (rootPath) {
+      // 1. Mount API Routes (priority)
+      // Requests to /rootPath/global/... will be handled by apiApp matching /global/...
+      baseApp.route(rootPath, apiApp)
+
+      // 2. Static Proxy (handling assets, index.html, and SPA routes)
+      // This catches everything else under /rootPath
+      // Note: Hono's route() handles prefix stripping, but use() with pattern needs careful handling.
+      // We manually check prefix in staticHandler, so we can mount it at root or use pattern.
+      // Using pattern to limit scope:
+      baseApp.use(`${rootPath}/*`, staticHandler)
+      baseApp.use(rootPath, staticHandler) // Handle exact rootPath
     } else {
-      baseApp = createAppWithRoutes(indexHandler, staticHandler, apiApp)
+      // No rootPath
+      baseApp.route("/", apiApp)
+      baseApp.use("/*", staticHandler)
     }
 
     const args = {
