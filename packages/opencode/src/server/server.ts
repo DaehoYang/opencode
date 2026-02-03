@@ -41,6 +41,7 @@ import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
 import { MDNS } from "./mdns"
 import { injectRootPath, normalizeUrl, HTML_CSP_HEADER } from "./html-utils"
+import { embeddedAssets } from "./embedded-assets"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -560,9 +561,34 @@ export namespace Server {
    * otherwise falls back to remote proxy
    */
   async function createStaticOrProxyHandler() {
+    // 1. Try embedded assets (for single-file binary)
+    const hasEmbeddedAssets = Object.keys(embeddedAssets).length > 0
+    if (hasEmbeddedAssets) {
+      log.info("📦 Serving embedded assets")
+      return {
+        type: "local" as const,
+        handler: async (c: any) => {
+          let path = c.req.path.slice(1) // remove leading /
+          if (path === "") path = "index.html"
+
+          // Handle root-path prefixed requests if necessary
+          const content_base64 = embeddedAssets[path]
+          if (content_base64) {
+            const buffer = Buffer.from(content_base64, "base64")
+            const mimeType = Bun.file(path).type || "application/octet-stream" // fallback inference
+            return new Response(buffer, {
+              headers: { "Content-Type": mimeType }
+            })
+          }
+          return c.text("Not Found", 404)
+        }
+      }
+    }
+
+    // 2. Try local file system
     const indexFile = Bun.file(APP_INDEX_PATH)
     const localAppExists = await indexFile.exists()
-    
+
     if (localAppExists) {
       log.info("📦 Serving app from local build (../app/dist)")
       return {
@@ -572,7 +598,7 @@ export namespace Server {
     } else {
       log.warn("🌐 Local app build not found, falling back to remote proxy (https://app.opencode.ai)")
       log.warn("   For better performance, build the app: cd packages/app && bun run build")
-      
+
       return {
         type: "proxy" as const,
         handler: async (c: any) => {
@@ -598,13 +624,21 @@ export namespace Server {
   function createIndexHandler(rootPath: string) {
     return async (c: any) => {
       try {
-        const indexFile = Bun.file(APP_INDEX_PATH)
-        if (!(await indexFile.exists())) {
-          log.warn("index.html not found at ../app/dist/index.html")
-          return c.text("Not Found", 404)
+        let html: string
+
+        // Check embedded first
+        if (embeddedAssets["index.html"]) {
+          html = Buffer.from(embeddedAssets["index.html"], "base64").toString("utf-8")
+        } else {
+          // Fallback to file system
+          const indexFile = Bun.file(APP_INDEX_PATH)
+          if (!(await indexFile.exists())) {
+            log.warn("index.html not found at ../app/dist/index.html")
+            return c.text("Not Found", 404)
+          }
+          html = await indexFile.text()
         }
 
-        const html = await indexFile.text()
         const modifiedHtml = injectRootPath(html, rootPath)
 
         return c.html(modifiedHtml, 200, {
@@ -655,8 +689,11 @@ export namespace Server {
 
     // rootPath requires local build for reliable routing
     if (opts.rootPath) {
+      // Check for embedded assets first
+      const hasEmbeddedAssets = Object.keys(embeddedAssets).length > 0
       const localAppExists = await Bun.file(APP_INDEX_PATH).exists()
-      if (!localAppExists) {
+
+      if (!localAppExists && !hasEmbeddedAssets) {
         throw new Error(
           "rootPath requires local app build.\n" +
           "Build the app first: cd packages/app && bun run build\n" +
@@ -664,7 +701,7 @@ export namespace Server {
         )
       }
     }
-    
+
     const { type: serveType, handler: staticHandler } = await createStaticOrProxyHandler()
 
     // Create single index handler (no duplication!)
@@ -680,7 +717,7 @@ export namespace Server {
       const rootedApp = new Hono()
         .basePath(opts.rootPath)
         .route("/", createAppWithRoutes(indexHandler, staticHandler, apiApp))
-      
+
       // Root app to handle both rooted and global asset paths
       baseApp = new Hono()
         .route("/", rootedApp)
