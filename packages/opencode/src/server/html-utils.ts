@@ -68,6 +68,21 @@ export function injectRootPath(html: string, rootPath: string): string {
             )
         }
 
+        // Rewrite absolute paths (href="/...", src="/...", content="/...") to include rootPath
+        // Match href/src/content attribute with value starting with / (but not //)
+        modifiedHtml = modifiedHtml.replace(
+            /(href|src|content)=(["'])\/(?!\/)([^"']*)\2/gi,
+            (match, attr, quote, path) => {
+                const fullPath = "/" + path
+                // Check if path already starts with rootPath or is just "/"
+                // Also ensure we don't double-prefix if rootPath is "/proxy" and path is "/proxy/..."
+                if (fullPath.startsWith(rootPath)) {
+                    return match
+                }
+                return `${attr}=${quote}${rootPath}${fullPath}${quote}`
+            }
+        )
+
         return modifiedHtml
     } catch (error) {
         log.error("Failed to inject rootPath into HTML", { error })
@@ -98,7 +113,7 @@ export function normalizeUrl(baseUrl: string, path?: string): string {
  */
 export const HTML_CSP_HEADER =
     "default-src 'self'; " +
-    "script-src 'self' 'wasm-unsafe-eval'; " +
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " +
     "style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data: https:; " +
     "font-src 'self' data:; " +

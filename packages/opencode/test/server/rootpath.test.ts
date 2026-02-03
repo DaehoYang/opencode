@@ -226,19 +226,11 @@ describe("WebSocket compatibility", () => {
   })
 })
 
-describe("Fallback strategy", () => {
-  test("validates fallback behavior when local build missing", () => {
-    // This test documents expected behavior
-    const scenarios = [
-      { hasLocalBuild: true, hasRootPath: false, expected: "local" },
-      { hasLocalBuild: false, hasRootPath: false, expected: "proxy" },
-      { hasLocalBuild: true, hasRootPath: true, expected: "local" },
-      { hasLocalBuild: false, hasRootPath: true, expected: "error" },
-    ]
-    
-    for (const scenario of scenarios) {
-      // Expected behavior documented
-      expect(scenario.expected).toBeDefined()
-    }
+describe("Remote proxy behavior", () => {
+  test("documents server behavior with remote proxy", () => {
+    // Server now always uses remote proxy (https://app.opencode.ai)
+    // Both with and without rootPath, static assets are fetched remotely
+    // index.html is cached for 5 minutes to reduce redundant fetches
+    expect(true).toBe(true)
   })
 })
