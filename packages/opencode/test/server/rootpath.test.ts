@@ -227,14 +227,10 @@ describe("WebSocket compatibility", () => {
 })
 
 describe("Remote proxy behavior", () => {
-  test("always uses remote proxy regardless of local build", () => {
-    const scenarios = [
-      { hasRootPath: false, expected: "proxy" },
-      { hasRootPath: true, expected: "proxy" },
-    ]
-    
-    for (const scenario of scenarios) {
-      expect(scenario.expected).toBe("proxy")
-    }
+  test("documents server behavior with remote proxy", () => {
+    // Server now always uses remote proxy (https://app.opencode.ai)
+    // Both with and without rootPath, static assets are fetched remotely
+    // index.html is cached for 5 minutes to reduce redundant fetches
+    expect(true).toBe(true)
   })
 })

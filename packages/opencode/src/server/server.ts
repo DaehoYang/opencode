@@ -49,6 +49,7 @@ export namespace Server {
   const log = Log.create({ service: "server" })
 
   const REMOTE_PROXY_URL = "https://app.opencode.ai"
+  const INDEX_CACHE_TTL_MS = 5 * 60 * 1000
 
   let _url: URL | undefined
   let _corsWhitelist: string[] = []
@@ -563,11 +564,10 @@ export namespace Server {
   function createIndexHandler(rootPath: string) {
     let cachedHtml: string | null = null
     let cacheTime = 0
-    const CACHE_TTL = 5 * 60 * 1000
     
     return async (c: any) => {
       const now = Date.now()
-      if (cachedHtml && (now - cacheTime) < CACHE_TTL) {
+      if (cachedHtml && (now - cacheTime) < INDEX_CACHE_TTL_MS) {
         return c.html(cachedHtml, 200, { "Content-Security-Policy": HTML_CSP_HEADER })
       }
       
