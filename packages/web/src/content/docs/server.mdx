@@ -61,6 +61,30 @@ opencode TUI running, `opencode serve` will start a new server.
 
 ---
 
+### Deployment
+
+OpenCode server uses remote UI (https://app.opencode.ai) by default.
+All processing happens locally - only frontend assets are fetched remotely.
+
+```bash
+# Standard mode
+opencode serve
+
+# Behind reverse proxy
+opencode serve --root-path /jupyter/proxy/opencode
+```
+
+**Reverse Proxy Mode:**
+
+When using `--root-path`, all routes are prefixed:
+
+```bash
+opencode serve --root-path /jupyter/proxy/opencode
+# Access at: http://your-server/jupyter/proxy/opencode/
+```
+
+---
+
 #### Connect to an existing server
 
 When you start the TUI it randomly assigns a port and hostname. You can instead pass in the `--hostname` and `--port` [flags](/docs/cli). Then use this to connect to its server.

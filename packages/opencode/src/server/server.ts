@@ -33,7 +33,7 @@ import { lazy } from "../util/lazy"
 import { InstanceBootstrap } from "../project/bootstrap"
 import { Storage } from "../storage/storage"
 import type { ContentfulStatusCode } from "hono/utils/http-status"
-import { websocket, serveStatic } from "hono/bun"
+import { websocket } from "hono/bun"
 import { HTTPException } from "hono/http-exception"
 import { errors } from "./error"
 import { QuestionRoutes } from "./routes/question"
@@ -48,9 +48,6 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 export namespace Server {
   const log = Log.create({ service: "server" })
 
-  // Constants for paths and URLs
-  const APP_DIST_PATH = "../app/dist"
-  const APP_INDEX_PATH = `${APP_DIST_PATH}/index.html`
   const REMOTE_PROXY_URL = "https://app.opencode.ai"
 
   let _url: URL | undefined
@@ -537,7 +534,7 @@ export namespace Server {
             })
           },
         )
-        .use("/*", serveStatic({ root: APP_DIST_PATH })) as unknown as Hono,
+        ) as unknown as Hono,
   )
 
   export async function openapi() {
@@ -555,65 +552,38 @@ export namespace Server {
     return result
   }
 
-  /**
-   * Creates a handler that serves static files locally if available,
-   * otherwise falls back to remote proxy
-   */
-  async function createStaticOrProxyHandler() {
-    const indexFile = Bun.file(APP_INDEX_PATH)
-    const localAppExists = await indexFile.exists()
+  async function fetchAndInjectIndexHtml(rootPath: string): Promise<string> {
+    const response = await fetch(`${REMOTE_PROXY_URL}/index.html`)
+    if (!response.ok) throw new Error(`Failed to fetch index.html: ${response.status}`)
     
-    if (localAppExists) {
-      log.info("📦 Serving app from local build (../app/dist)")
-      return {
-        type: "local" as const,
-        handler: serveStatic({ root: APP_DIST_PATH })
+    const html = await response.text()
+    return rootPath ? injectRootPath(html, rootPath) : html
+  }
+
+  function createIndexHandler(rootPath: string) {
+    let cachedHtml: string | null = null
+    let cacheTime = 0
+    const CACHE_TTL = 5 * 60 * 1000
+    
+    return async (c: any) => {
+      const now = Date.now()
+      if (cachedHtml && (now - cacheTime) < CACHE_TTL) {
+        return c.html(cachedHtml, 200, { "Content-Security-Policy": HTML_CSP_HEADER })
       }
-    } else {
-      log.warn("🌐 Local app build not found, falling back to remote proxy (https://app.opencode.ai)")
-      log.warn("   For better performance, build the app: cd packages/app && bun run build")
       
-      return {
-        type: "proxy" as const,
-        handler: async (c: any) => {
-          const path = c.req.path
-          const response = await proxy(`${REMOTE_PROXY_URL}${path}`, {
-            ...c.req,
-            headers: {
-              ...c.req.raw.headers,
-              host: "app.opencode.ai",
-            },
-          })
-          response.headers.set("Content-Security-Policy", HTML_CSP_HEADER)
-          return response
-        }
-      }
+      cachedHtml = await fetchAndInjectIndexHtml(rootPath)
+      cacheTime = now
+      return c.html(cachedHtml, 200, { "Content-Security-Policy": HTML_CSP_HEADER })
     }
   }
 
-  /**
-   * Creates a handler that serves index.html with rootPath injection
-   * Centralizes HTML serving logic to avoid duplication
-   */
-  function createIndexHandler(rootPath: string) {
+  function createStaticHandler() {
     return async (c: any) => {
-      try {
-        const indexFile = Bun.file(APP_INDEX_PATH)
-        if (!(await indexFile.exists())) {
-          log.warn("index.html not found at ../app/dist/index.html")
-          return c.text("Not Found", 404)
-        }
-
-        const html = await indexFile.text()
-        const modifiedHtml = injectRootPath(html, rootPath)
-
-        return c.html(modifiedHtml, 200, {
-          "Content-Security-Policy": HTML_CSP_HEADER,
-        })
-      } catch (error) {
-        log.error("Error serving index.html", { error })
-        return c.text("Internal Server Error", 500)
-      }
+      const response = await proxy(`${REMOTE_PROXY_URL}${c.req.path}`, {
+        ...c.req,
+        headers: { ...c.req.raw.headers, host: "app.opencode.ai" }
+      })
+      return response
     }
   }
 
@@ -633,61 +603,25 @@ export namespace Server {
       .all("/*", indexHandler) as unknown as Hono
   }
 
-  /**
-   * Starts the OpenCode HTTP server
-   * 
-   * @param opts.rootPath - Base path for reverse proxy deployment (e.g., "/jupyter/proxy/opencode")
-   *                        When provided, requires local app build. Without it, falls back to remote proxy.
-   * 
-   * @example
-   * // Standard mode (auto fallback)
-   * listen({ port: 4096, hostname: "localhost" })
-   * 
-   * @example
-   * // Reverse proxy mode (requires local build)
-   * listen({ port: 4096, hostname: "0.0.0.0", rootPath: "/proxy" })
-   * 
-   * @throws {Error} If rootPath is provided but local app build is missing
-   */
   export async function listen(opts: { port: number; hostname: string; mdns?: boolean; cors?: string[]; rootPath?: string }) {
     _corsWhitelist = opts.cors ?? []
     _rootPath = opts.rootPath ?? ""
-
-    // rootPath requires local build for reliable routing
-    if (opts.rootPath) {
-      const localAppExists = await Bun.file(APP_INDEX_PATH).exists()
-      if (!localAppExists) {
-        throw new Error(
-          "rootPath requires local app build.\n" +
-          "Build the app first: cd packages/app && bun run build\n" +
-          "Or run without --root-path to use remote proxy."
-        )
-      }
-    }
     
-    const { type: serveType, handler: staticHandler } = await createStaticOrProxyHandler()
-
-    // Create single index handler (no duplication!)
+    const staticHandler = createStaticHandler()
     const indexHandler = createIndexHandler(_rootPath)
     const apiApp = App()
 
-    // Setup routing based on whether rootPath is provided
     let baseApp: Hono
 
     if (opts.rootPath) {
-      // When behind reverse proxy: mount app at rootPath
-      // This ensures all routes including WebSocket work correctly
       const rootedApp = new Hono()
         .basePath(opts.rootPath)
         .route("/", createAppWithRoutes(indexHandler, staticHandler, apiApp))
       
-      // Root app to handle both rooted and global asset paths
       baseApp = new Hono()
         .route("/", rootedApp)
-        // Serve static assets that may use absolute paths (e.g., /assets/...)
         .use("/*", staticHandler)
     } else {
-      // Standard setup without rootPath
       baseApp = createAppWithRoutes(indexHandler, staticHandler, apiApp)
     }
 

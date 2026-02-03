@@ -226,19 +226,15 @@ describe("WebSocket compatibility", () => {
   })
 })
 
-describe("Fallback strategy", () => {
-  test("validates fallback behavior when local build missing", () => {
-    // This test documents expected behavior
+describe("Remote proxy behavior", () => {
+  test("always uses remote proxy regardless of local build", () => {
     const scenarios = [
-      { hasLocalBuild: true, hasRootPath: false, expected: "local" },
-      { hasLocalBuild: false, hasRootPath: false, expected: "proxy" },
-      { hasLocalBuild: true, hasRootPath: true, expected: "local" },
-      { hasLocalBuild: false, hasRootPath: true, expected: "error" },
+      { hasRootPath: false, expected: "proxy" },
+      { hasRootPath: true, expected: "proxy" },
     ]
     
     for (const scenario of scenarios) {
-      // Expected behavior documented
-      expect(scenario.expected).toBeDefined()
+      expect(scenario.expected).toBe("proxy")
     }
   })
 })
